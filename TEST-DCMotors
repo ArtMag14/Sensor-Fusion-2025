@@ -1,0 +1,90 @@
+// Motor Control with ESP32 - Basic Test
+// Controls two 12V DC motors using L298N motor driver
+
+// Motor A pins
+const int motorA_IN1 = 16;  // GPIO16 - Control pin 1 for Motor A
+const int motorA_IN2 = 17;  // GPIO17 - Control pin 2 for Motor A
+const int motorA_ENA = 18;  // GPIO18 - PWM enable pin for Motor A
+
+// Motor B pins
+const int motorB_IN1 = 19;  // GPIO19 - Control pin 1 for Motor B
+const int motorB_IN2 = 20;  // GPIO20 - Control pin 2 for Motor B
+const int motorB_ENB = 21;  // GPIO21 - PWM enable pin for Motor B
+
+// PWM properties
+const int freq = 5000;     // PWM frequency (5kHz)
+const int resolution = 8;  // 8-bit resolution (0-255)
+const int motorSpeed = 200; // Speed value (0-255)
+
+void setup() {
+  Serial.begin(115200);
+  Serial.println("ESP32 Motor Control Test Starting...");
+  
+  // Configure motor pins as outputs
+  pinMode(motorA_IN1, OUTPUT);
+  pinMode(motorA_IN2, OUTPUT);
+  pinMode(motorB_IN1, OUTPUT);
+  pinMode(motorB_IN2, OUTPUT);
+  
+  // Configure PWM channels
+  ledcSetup(0, freq, resolution); // Channel 0 for Motor A
+  ledcSetup(1, freq, resolution); // Channel 1 for Motor B
+  
+  // Attach PWM channels to enable pins
+  ledcAttachPin(motorA_ENA, 0);
+  ledcAttachPin(motorB_ENB, 1);
+  
+  // Set initial motor speed
+  ledcWrite(0, motorSpeed); // Motor A speed
+  ledcWrite(1, motorSpeed); // Motor B speed
+  
+  delay(1000); // Wait for initialization
+}
+
+void loop() {
+  Serial.println("Both motors FORWARD for 3 seconds");
+  motorForward();
+  delay(3000);
+  
+  Serial.println("Both motors STOP for 2 seconds");
+  motorStop();
+  delay(2000);
+  
+  Serial.println("Both motors REVERSE for 3 seconds");
+  motorReverse();
+  delay(3000);
+  
+  Serial.println("Both motors STOP for 2 seconds");
+  motorStop();
+  delay(2000);
+}
+
+void motorForward() {
+  // Motor A forward
+  digitalWrite(motorA_IN1, HIGH);
+  digitalWrite(motorA_IN2, LOW);
+  
+  // Motor B forward
+  digitalWrite(motorB_IN1, HIGH);
+  digitalWrite(motorB_IN2, LOW);
+}
+
+void motorReverse() {
+  // Motor A reverse
+  digitalWrite(motorA_IN1, LOW);
+  digitalWrite(motorA_IN2, HIGH);
+  
+  // Motor B reverse
+  digitalWrite(motorB_IN1, LOW);
+  digitalWrite(motorB_IN2, HIGH);
+}
+
+void motorStop() {
+  // Motor A stop
+  digitalWrite(motorA_IN1, LOW);
+  digitalWrite(motorA_IN2, LOW);
+  
+  // Motor B stop
+  digitalWrite(motorB_IN1, LOW);
+  digitalWrite(motorB_IN2, LOW);
+}

@@ -1,6 +1,12 @@
 // Ultrasound Sensor Test with ESP32-WROOM-32
 // HC-SR04 Sensor Example
-
+/*
+Pin connections:
+Echo pin on HC-SR04  -> GPI04
+Trig pin on HC-SR04  -> GPI05
+Vcc pin on HC-SR04  -> 3.3V
+GND pin on HC-SR04 -> GND
+*/
 // Pin definitions
 const int trigPin = 4;   // GPIO4 - Trigger pin (output)
 const int echoPin = 5;   // GPIO5 - Echo pin (input)

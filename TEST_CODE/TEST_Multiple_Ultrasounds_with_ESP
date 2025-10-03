@@ -1,1 +1,3 @@
-
+//Goal should be to incorporate the ultrasounds for the front and back into one or two ESPs for the time being so that we can reliably get motor driver and ultra sound data effectively. 
+//Will need to label each sensor for their corresponding direction
+//ESPs have the ability to use bluetooth and wifi it would be a good idea for these devices to be transmitting the live data back to us during testing.

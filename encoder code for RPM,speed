@@ -1,0 +1,122 @@
+// --- Parallax 36-position Quadrature Encoder + Motor Control (ESP32) ---
+// Calculates RPM, speed, and keeps UGV moving straight
+
+// ------------------ USER PARAMETERS ------------------
+#define COUNTS_PER_REV 144      // 36 CPR × 4 quadrature
+#define WHEEL_DIAMETER 0.065    // meters (example: 6.5 cm)
+#define WHEEL_BASE     0.20     // meters (distance between wheels)
+
+// Motor driver pins (VNH5019 or similar)
+#define LEFT_PWM 25
+#define LEFT_DIR 26
+#define RIGHT_PWM 27
+#define RIGHT_DIR 14
+
+// Encoder pins
+#define LEFT_ENC_A 34
+#define LEFT_ENC_B 35
+#define RIGHT_ENC_A 32
+#define RIGHT_ENC_B 33
+
+// ------------------ VARIABLES ------------------
+volatile long leftCount = 0;
+volatile long rightCount = 0;
+
+float leftRPM = 0, rightRPM = 0;
+float leftSpeed = 0, rightSpeed = 0, avgSpeed = 0; // m/s
+float targetSpeed = 0.5; // desired linear speed (m/s)
+unsigned long lastUpdate = 0;
+const int updateInterval = 200; // ms
+
+// PID control for straight motion
+float Kp = 0.8, Ki = 0.0, Kd = 0.1;
+float errorSum = 0, lastError = 0;
+
+// ------------------ INTERRUPT ROUTINES ------------------
+void IRAM_ATTR leftEncoderA() {
+  bool bState = digitalRead(LEFT_ENC_B);
+  leftCount += (bState) ? 1 : -1;
+}
+
+void IRAM_ATTR rightEncoderA() {
+  bool bState = digitalRead(RIGHT_ENC_B);
+  rightCount += (bState) ? 1 : -1;
+}
+
+// ------------------ SETUP ------------------
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(LEFT_ENC_A, INPUT_PULLUP);
+  pinMode(LEFT_ENC_B, INPUT_PULLUP);
+  pinMode(RIGHT_ENC_A, INPUT_PULLUP);
+  pinMode(RIGHT_ENC_B, INPUT_PULLUP);
+
+  attachInterrupt(digitalPinToInterrupt(LEFT_ENC_A), leftEncoderA, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(RIGHT_ENC_A), rightEncoderA, CHANGE);
+
+  pinMode(LEFT_PWM, OUTPUT);
+  pinMode(LEFT_DIR, OUTPUT);
+  pinMode(RIGHT_PWM, OUTPUT);
+  pinMode(RIGHT_DIR, OUTPUT);
+
+  Serial.println("UGV Encoder + RPM + Straight-line control initialized");
+}
+
+// ------------------ HELPER FUNCTIONS ------------------
+void setMotorSpeed(int pwmPin, int dirPin, float speed) {
+  int pwmValue = constrain(abs(speed) * 255, 0, 255);
+  digitalWrite(dirPin, (speed >= 0) ? HIGH : LOW);
+  analogWrite(pwmPin, pwmValue);
+}
+
+void updateSpeeds() {
+  static long lastLeft = 0, lastRight = 0;
+  unsigned long now = millis();
+  float dt = (now - lastUpdate) / 1000.0;
+  if (dt <= 0) return;
+
+  long dLeft = leftCount - lastLeft;
+  long dRight = rightCount - lastRight;
+
+  leftRPM = (dLeft / (float)COUNTS_PER_REV) / dt * 60.0;
+  rightRPM = (dRight / (float)COUNTS_PER_REV) / dt * 60.0;
+
+  float wheelCirc = WHEEL_DIAMETER * 3.1416;
+  leftSpeed = (leftRPM / 60.0) * wheelCirc;
+  rightSpeed = (rightRPM / 60.0) * wheelCirc;
+  avgSpeed = (leftSpeed + rightSpeed) / 2.0;
+
+  lastLeft = leftCount;
+  lastRight = rightCount;
+  lastUpdate = now;
+}
+
+void keepStraight() {
+  float error = leftSpeed - rightSpeed;
+  errorSum += error;
+  float dError = error - lastError;
+  float correction = Kp * error + Ki * errorSum + Kd * dError;
+
+  // Adjust each motor speed to correct heading
+  float leftCmd = targetSpeed - correction;
+  float rightCmd = targetSpeed + correction;
+
+  setMotorSpeed(LEFT_PWM, LEFT_DIR, leftCmd);
+  setMotorSpeed(RIGHT_PWM, RIGHT_DIR, rightCmd);
+
+  lastError = error;
+}
+
+// ------------------ MAIN LOOP ------------------
+void loop() {
+  if (millis() - lastUpdate >= updateInterval) {
+    updateSpeeds();
+    keepStraight();
+
+    Serial.print("Left RPM: "); Serial.print(leftRPM);
+    Serial.print(" | Right RPM: "); Serial.print(rightRPM);
+    Serial.print(" | Avg Speed: "); Serial.print(avgSpeed);
+    Serial.print(" m/s | Error: "); Serial.println(leftSpeed - rightSpeed);
+  }
+}

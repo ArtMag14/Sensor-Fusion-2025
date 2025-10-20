@@ -1,3 +1,232 @@
-//Goal should be to incorporate the ultrasounds for the front and back into one or two ESPs for the time being so that we can reliably get motor driver and ultra sound data effectively. 
-//Will need to label each sensor for their corresponding direction
-//ESPs have the ability to use bluetooth and wifi it would be a good idea for these devices to be transmitting the live data back to us during testing.
+#include <Arduino.h>
+
+// ----------------------------
+// Motor pins / PWM
+// ----------------------------
+#define M1_PWM   4
+#define M1_INA   16
+#define M1_INB   17
+#define M1_EN    -1 // tie to 5V if not used
+
+#define M2_PWM   5
+#define M2_INA   18
+#define M2_INB   7
+#define M2_EN    -1 // tie to 5V if not used
+
+#define PWM_FREQ 20000
+#define PWM_RES  10
+#define CH_M1    0
+#define CH_M2    1
+
+// ----------------------------
+// Encoder pins
+// ----------------------------
+#define ENC1_A 10
+#define ENC1_B 11
+volatile long enc1Count = 0;
+
+#define ENC2_A 12
+#define ENC2_B 13
+volatile long enc2Count = 0;
+
+// ----------------------------
+// Ultrasonic pins
+// ----------------------------
+// Group 1: sensors 1–5
+#define TRIG1 8
+#define ECHO1 19 // Front Left
+#define ECHO2 21 // Front
+#define ECHO3 22 // Front Right
+#define ECHO4 23 // Front Left Wheel
+#define ECHO5 25 // Front Right Wheel
+
+// Group 2: sensors 6–10
+#define TRIG2 9
+#define ECHO6 26 // Back Left
+#define ECHO7 27 // Back
+#define ECHO8 32 // Back Right
+#define ECHO9 33 // Back Left Wheel
+#define ECHO10 34 // Back Right Wheel
+
+#define NUM_SENSORS 10
+
+// Array of ECHO pins in order
+const int echoPins[NUM_SENSORS] = {ECHO1,ECHO2,ECHO3,ECHO4,ECHO5,ECHO6,ECHO7,ECHO8,ECHO9,ECHO10};
+
+// Assign names for clarity
+enum UltrasonicNames {
+  FRONT_LEFT=0,
+  FRONT,
+  FRONT_RIGHT,
+  FRONT_LEFT_WHEEL,
+  FRONT_RIGHT_WHEEL,
+  BACK_LEFT,
+  BACK,
+  BACK_RIGHT,
+  BACK_LEFT_WHEEL,
+  BACK_RIGHT_WHEEL
+};
+
+float distances[NUM_SENSORS];
+
+// Threshold for obstacle detection (cm)
+#define OBSTACLE_THRESHOLD 20
+
+// ----------------------------
+// Function prototypes
+// ----------------------------
+void IRAM_ATTR onEncoder1();
+void IRAM_ATTR onEncoder2();
+float readUltrasound(int idx);
+void setMotorsForward(int speed);
+void stopMotors();
+void reverseVehicle(int duration_ms);
+void turnVehicle(int duration_ms, bool leftTurn);
+
+// ----------------------------
+// Setup
+// ----------------------------
+void setup() {
+  Serial.begin(115200);
+  delay(50);
+  Serial.println("Vehicle Test with 10 Ultrasonics, 2 Motors, 2 Encoders");
+
+  // Motor pins
+  pinMode(M1_INA, OUTPUT);
+  pinMode(M1_INB, OUTPUT);
+  pinMode(M2_INA, OUTPUT);
+  pinMode(M2_INB, OUTPUT);
+  if(M1_EN>=0) { pinMode(M1_EN, OUTPUT); digitalWrite(M1_EN,HIGH);}
+  if(M2_EN>=0) { pinMode(M2_EN, OUTPUT); digitalWrite(M2_EN,HIGH);}
+
+  ledcSetup(CH_M1,PWM_FREQ,PWM_RES);
+  ledcAttachPin(M1_PWM, CH_M1);
+  ledcSetup(CH_M2,PWM_FREQ,PWM_RES);
+  ledcAttachPin(M2_PWM, CH_M2);
+
+  // Encoder pins
+  pinMode(ENC1_A, INPUT_PULLUP);
+  pinMode(ENC1_B, INPUT_PULLUP);
+  pinMode(ENC2_A, INPUT_PULLUP);
+  pinMode(ENC2_B, INPUT_PULLUP);
+  attachInterrupt(digitalPinToInterrupt(ENC1_A), onEncoder1, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(ENC2_A), onEncoder2, CHANGE);
+
+  // Ultrasonic pins
+  pinMode(TRIG1, OUTPUT);
+  pinMode(TRIG2, OUTPUT);
+  for(int i=0;i<NUM_SENSORS;i++) pinMode(echoPins[i], INPUT);
+}
+
+// ----------------------------
+// Main loop
+// ----------------------------
+void loop() {
+  // Move forward at slow speed
+  setMotorsForward(400);
+
+  // Read all sensors sequentially
+  for(int i=0;i<NUM_SENSORS;i++){
+    distances[i] = readUltrasound(i);
+  }
+
+  // Print telemetry
+  Serial.print("Encoders: ");
+  Serial.print(enc1Count); Serial.print(", "); Serial.print(enc2Count); Serial.println();
+  Serial.print("Distances (cm): ");
+  for(int i=0;i<NUM_SENSORS;i++){
+    Serial.print(distances[i]); Serial.print(" ");
+  }
+  Serial.println();
+
+  // Obstacle avoidance logic
+  if(distances[FRONT_LEFT]<OBSTACLE_THRESHOLD || distances[FRONT]<OBSTACLE_THRESHOLD || distances[FRONT_RIGHT]<OBSTACLE_THRESHOLD){
+    Serial.println("Obstacle detected ahead! Reversing...");
+    reverseVehicle(500);        // reverse for 0.5s
+    // Simple turn decision: turn away from closest obstacle
+    if(distances[FRONT_LEFT] < distances[FRONT_RIGHT]){
+      turnVehicle(400,true);    // turn left
+    } else {
+      turnVehicle(400,false);   // turn right
+    }
+  }
+
+  delay(50); // small loop delay
+}
+
+// ----------------------------
+// Encoder ISRs
+// ----------------------------
+void IRAM_ATTR onEncoder1(){
+  int A = digitalRead(ENC1_A);
+  int B = digitalRead(ENC1_B);
+  if(A==B) enc1Count++;
+  else enc1Count--;
+}
+
+void IRAM_ATTR onEncoder2(){
+  int A = digitalRead(ENC2_A);
+  int B = digitalRead(ENC2_B);
+  if(A==B) enc2Count++;
+  else enc2Count--;
+}
+
+// ----------------------------
+// Ultrasonic reading function
+// ----------------------------
+float readUltrasound(int idx){
+  int trigPin = (idx<5)?TRIG1:TRIG2;
+
+  digitalWrite(trigPin, LOW);
+  delayMicroseconds(2);
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(trigPin, LOW);
+
+  // Read pulse duration on ECHO
+  long duration = pulseIn(echoPins[idx], HIGH, 30000); // 30ms timeout (~5m)
+  float distance = duration*0.0343/2.0; // cm
+
+  if(duration==0) distance = 500; // timeout → no object detected
+  return distance;
+}
+
+// ----------------------------
+// Motor functions
+// ----------------------------
+void setMotorsForward(int speed){
+  digitalWrite(M1_INA,HIGH); digitalWrite(M1_INB,LOW);
+  digitalWrite(M2_INA,HIGH); digitalWrite(M2_INB,LOW);
+  ledcWrite(CH_M1, speed);
+  ledcWrite(CH_M2, speed);
+}
+
+void stopMotors(){
+  ledcWrite(CH_M1,0);
+  ledcWrite(CH_M2,0);
+  digitalWrite(M1_INA,LOW); digitalWrite(M1_INB,LOW);
+  digitalWrite(M2_INA,LOW); digitalWrite(M2_INB,LOW);
+}
+
+void reverseVehicle(int duration_ms){
+  digitalWrite(M1_INA,LOW); digitalWrite(M1_INB,HIGH);
+  digitalWrite(M2_INA,LOW); digitalWrite(M2_INB,HIGH);
+  ledcWrite(CH_M1,400);
+  ledcWrite(CH_M2,400);
+  delay(duration_ms);
+}
+
+void turnVehicle(int duration_ms, bool leftTurn){
+  if(leftTurn){
+    // left turn in place: left motor reverse, right motor forward
+    digitalWrite(M1_INA,LOW); digitalWrite(M1_INB,HIGH);
+    digitalWrite(M2_INA,HIGH); digitalWrite(M2_INB,LOW);
+  } else {
+    // right turn in place: left motor forward, right motor reverse
+    digitalWrite(M1_INA,HIGH); digitalWrite(M1_INB,LOW);
+    digitalWrite(M2_INA,LOW); digitalWrite(M2_INB,HIGH);
+  }
+  ledcWrite(CH_M1,400);
+  ledcWrite(CH_M2,400);
+  delay(duration_ms);
+}

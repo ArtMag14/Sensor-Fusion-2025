@@ -1,0 +1,189 @@
+
+// ---------------- USER PARAMETERS ----------------
+#define COUNTS_PER_REV        15          // CALIBRATED from real data
+#define WHEEL_DIAMETER_CM    6.5
+
+#define TARGET_DISTANCE_METERS  2.4384    // 8 ft
+#define DECEL_DISTANCE_METERS   0.60      // start slowing at 60 cm
+
+#define MAX_PWM               200
+#define MIN_MOVING_PWM         60
+
+// ---------------- MOTOR PINS ----------------
+#define LEFT_PWM   4
+#define LEFT_IN1   17
+#define LEFT_IN2   16
+
+#define RIGHT_PWM  5
+#define RIGHT_IN1  18
+#define RIGHT_IN2  7
+
+// ---------------- ENCODER PINS ----------------
+#define LEFT_ENC_A   12
+#define LEFT_ENC_B   13
+#define RIGHT_ENC_A  48
+#define RIGHT_ENC_B  47
+
+// ---------------- VARIABLES ----------------
+volatile long leftCount  = 0;
+volatile long rightCount = 0;
+
+long lastLeftCount  = 0;
+long lastRightCount = 0;
+
+float distanceMeters = 0.0;
+float speedMps       = 0.0;
+
+unsigned long lastUpdate = 0;
+const unsigned long updateInterval = 100; // ms
+
+// ---------------- ENCODER ISRs ----------------
+void IRAM_ATTR leftEncoderISR() {
+  leftCount += digitalRead(LEFT_ENC_B) ? 1 : -1;
+}
+
+void IRAM_ATTR rightEncoderISR() {
+  rightCount += digitalRead(RIGHT_ENC_B) ? -1 : 1;
+}
+
+// ---------------- MOTOR CONTROL ----------------
+void setMotor(int in1, int in2, int pwmPin, int pwm) {
+
+  pwm = constrain(pwm, -255, 255);
+
+  if (pwm > 0) {
+    digitalWrite(in1, HIGH);
+    digitalWrite(in2, LOW);
+  } else if (pwm < 0) {
+    digitalWrite(in1, LOW);
+    digitalWrite(in2, HIGH);
+  } else {
+    digitalWrite(in1, LOW);
+    digitalWrite(in2, LOW);
+  }
+
+  analogWrite(pwmPin, abs(pwm));
+}
+
+void stopMotors() {
+  setMotor(LEFT_IN1, LEFT_IN2, LEFT_PWM, 0);
+  setMotor(RIGHT_IN1, RIGHT_IN2, RIGHT_PWM, 0);
+}
+
+// ---------------- UPDATE DISTANCE + SPEED ----------------
+void updateMotion() {
+
+  unsigned long now = millis();
+  float dt = (now - lastUpdate) / 1000.0;
+  if (dt <= 0) return;
+
+  long dL = leftCount  - lastLeftCount;
+  long dR = rightCount - lastRightCount;
+
+  // magnitude-only distance accumulation
+  float avgCounts = (abs(dL) + abs(dR)) / 2.0;
+
+  float wheelCircMeters = (WHEEL_DIAMETER_CM * PI) / 100.0;
+  float deltaDist = (avgCounts / COUNTS_PER_REV) * wheelCircMeters;
+
+  distanceMeters += deltaDist;
+  speedMps = deltaDist / dt;
+
+  lastLeftCount  = leftCount;
+  lastRightCount = rightCount;
+  lastUpdate     = now;
+}
+
+// ---------------- DECELERATION CONTROL ----------------
+int computePWM() {
+
+  float remaining = TARGET_DISTANCE_METERS - distanceMeters;
+
+  if (remaining <= 0) {
+    return 0;
+  }
+
+  if (remaining >= DECEL_DISTANCE_METERS) {
+    return MAX_PWM;
+  }
+
+  float ratio = remaining / DECEL_DISTANCE_METERS;
+
+  int pwm = MIN_MOVING_PWM +
+            (int)((MAX_PWM - MIN_MOVING_PWM) * ratio);
+
+  return constrain(pwm, MIN_MOVING_PWM, MAX_PWM);
+}
+
+// ---------------- SERIAL REPORT ----------------
+void printStatus() {
+  Serial.print("Dist (m): ");
+  Serial.print(distanceMeters, 3);
+  Serial.print(" | Speed (m/s): ");
+  Serial.print(speedMps, 3);
+  Serial.print(" | L cnt: ");
+  Serial.print(leftCount);
+  Serial.print(" | R cnt: ");
+  Serial.println(rightCount);
+}
+
+// ---------------- SETUP ----------------
+void setup() {
+
+  Serial.begin(115200);
+
+  pinMode(LEFT_IN1, OUTPUT);
+  pinMode(LEFT_IN2, OUTPUT);
+  pinMode(RIGHT_IN1, OUTPUT);
+  pinMode(RIGHT_IN2, OUTPUT);
+
+  pinMode(LEFT_PWM, OUTPUT);
+  pinMode(RIGHT_PWM, OUTPUT);
+
+  pinMode(LEFT_ENC_A, INPUT_PULLUP);
+  pinMode(LEFT_ENC_B, INPUT_PULLUP);
+  pinMode(RIGHT_ENC_A, INPUT_PULLUP);
+  pinMode(RIGHT_ENC_B, INPUT_PULLUP);
+
+  attachInterrupt(digitalPinToInterrupt(LEFT_ENC_A), leftEncoderISR, RISING);
+  attachInterrupt(digitalPinToInterrupt(RIGHT_ENC_A), rightEncoderISR, RISING);
+
+  Serial.println("Drive Forward — Stop at 8 Feet (Calibrated)");
+  delay(2000);
+}
+
+// ---------------- MAIN LOOP ----------------
+void loop() {
+
+  // reset state
+  distanceMeters = 0.0;
+  speedMps = 0.0;
+
+  leftCount = 0;
+  rightCount = 0;
+  lastLeftCount = 0;
+  lastRightCount = 0;
+
+  lastUpdate = millis();
+  delay(1000);
+
+  Serial.println("Driving forward...");
+
+  while (distanceMeters < TARGET_DISTANCE_METERS) {
+
+    delay(updateInterval);
+    updateMotion();
+
+    int pwm = computePWM();
+
+    setMotor(LEFT_IN1, LEFT_IN2, LEFT_PWM, pwm);
+    setMotor(RIGHT_IN1, RIGHT_IN2, RIGHT_PWM, pwm);
+
+    printStatus();
+  }
+
+  stopMotors();
+  Serial.println("Target distance reached");
+
+  while (true);
+}

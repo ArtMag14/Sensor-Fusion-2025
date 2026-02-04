@@ -1,73 +1,231 @@
-// Ultrasound Sensor Test with ESP32-WROOM-32
-// HC-SR04 Sensor Example
-/*
-Pin connections:
-Echo pin on HC-SR04  -> GPI04
-Trig pin on HC-SR04  -> GPI05
-Vcc pin on HC-SR04  -> 3.3V
-GND pin on HC-SR04 -> GND
-*/
-// Pin definitions
-const int trigPin = 4;   // GPIO4 - Trigger pin (output)
-const int echoPin = 5;   // GPIO5 - Echo pin (input)
+/****************************************************
+ * USER PARAMETERS
+ ****************************************************/
+#define COUNTS_PER_REV        15        // calibrated
+#define WHEEL_DIAMETER_CM    6.5
+#define MAX_PWM              200
+#define MIN_MOVING_PWM        60
 
-// Variables for distance calculation
-long duration;
-float distance;
-float distanceInches;
+#define SAFE_DISTANCE        30.0       // cm
+#define WARNING_DISTANCE     60.0       // cm
+#define SIDE_WARNING         25.0       // cm
 
-void setup() {
-  // Initialize serial communication
-  Serial.begin(115200);
-  
-  // Initialize pins
-  pinMode(trigPin, OUTPUT);
-  pinMode(echoPin, INPUT);
-  
-  Serial.println("Ultrasound Sensor Test - ESP32");
-  Serial.println("===============================");
-  delay(1000);
+#define UPDATE_INTERVAL_MS   100
+
+/****************************************************
+ * MOTOR PINS (UNCHANGED)
+ ****************************************************/
+#define LEFT_PWM   4
+#define LEFT_IN1   17
+#define LEFT_IN2   16
+
+#define RIGHT_PWM  5
+#define RIGHT_IN1  18
+#define RIGHT_IN2  7
+
+/****************************************************
+ * ENCODER PINS (UNCHANGED)
+ ****************************************************/
+#define LEFT_ENC_A   12
+#define LEFT_ENC_B   13
+#define RIGHT_ENC_A  48
+#define RIGHT_ENC_B  47
+
+/****************************************************
+ * ULTRASONIC PINS (UNCHANGED)
+ ****************************************************/
+struct UltrasonicSensor {
+  uint8_t trigPin;
+  uint8_t echoPin;
+};
+
+UltrasonicSensor sensorFront = {19, 18};
+UltrasonicSensor sensorLeft  = {23, 5};
+UltrasonicSensor sensorRight = {15, 17};
+UltrasonicSensor sensorBack  = {2, 4};
+
+/****************************************************
+ * GLOBALS
+ ****************************************************/
+volatile long leftCount  = 0;
+volatile long rightCount = 0;
+
+long lastLeftCount  = 0;
+long lastRightCount = 0;
+
+float distanceMeters = 0.0;
+float speedMps       = 0.0;
+
+unsigned long lastUpdate = 0;
+
+/****************************************************
+ * ENCODER ISRs (ESP32 SAFE)
+ ****************************************************/
+void IRAM_ATTR leftEncoderISR() {
+  leftCount++;
 }
 
-void loop() {
-  // Clear the trigPin
-  digitalWrite(trigPin, LOW);
-  delayMicroseconds(2);
-  
-  // Set trigPin HIGH for 10 microseconds to send pulse
-  digitalWrite(trigPin, HIGH);
-  delayMicroseconds(10);
-  digitalWrite(trigPin, LOW);
-  
-  // Read the echoPin, returns the sound wave travel time in microseconds
-  duration = pulseIn(echoPin, HIGH);
-  
-  // Calculate distance (in cm)
-  // Speed of sound = 343 m/s = 0.0343 cm/microsecond
-  // Distance = (time × speed of sound) / 2 (round trip)
-  distance = duration * 0.0343 / 2;
-  
-  // Calculate distance in inches
-  distanceInches = duration * 0.0133 / 2;
-  
-  // Display results
-  Serial.print("Distance: ");
-  Serial.print(distance);
-  Serial.print(" cm | ");
-  Serial.print(distanceInches);
-  Serial.println(" inches");
-  
-  // Add some conditions for testing
-  if (distance < 10) {
-    Serial.println("⚠️  Object very close!");
-  } else if (distance < 50) {
-    Serial.println("📍 Object detected nearby");
-  } else if (distance > 400) {
-    Serial.println("🔭 No object detected (out of range)");
+void IRAM_ATTR rightEncoderISR() {
+  rightCount++;
+}
+
+/****************************************************
+ * MOTOR CONTROL
+ ****************************************************/
+void setMotor(int in1, int in2, int pwmPin, int pwm) {
+  pwm = constrain(pwm, -255, 255);
+
+  if (pwm > 0) {
+    digitalWrite(in1, HIGH);
+    digitalWrite(in2, LOW);
+  } else if (pwm < 0) {
+    digitalWrite(in1, LOW);
+    digitalWrite(in2, HIGH);
+  } else {
+    digitalWrite(in1, LOW);
+    digitalWrite(in2, LOW);
   }
-  
-  Serial.println("-------------------");
-  
-  // Wait before next reading
-  delay(1000);
+
+  analogWrite(pwmPin, abs(pwm));
+}
+
+void stopMotors() {
+  setMotor(LEFT_IN1, LEFT_IN2, LEFT_PWM, 0);
+  setMotor(RIGHT_IN1, RIGHT_IN2, RIGHT_PWM, 0);
+}
+
+/****************************************************
+ * ULTRASONIC MEASUREMENT
+ ****************************************************/
+float measureDistanceCM(UltrasonicSensor s) {
+  digitalWrite(s.trigPin, LOW);
+  delayMicroseconds(2);
+  digitalWrite(s.trigPin, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(s.trigPin, LOW);
+
+  long duration = pulseIn(s.echoPin, HIGH, 30000);
+  if (duration == 0) return 400.0;
+  return (duration * 0.0343) / 2.0;
+}
+
+/****************************************************
+ * ENCODER CALCULATIONS
+ ****************************************************/
+void updateEncoderMetrics() {
+  long dL = abs(leftCount - lastLeftCount);
+  long dR = abs(rightCount - lastRightCount);
+
+  lastLeftCount  = leftCount;
+  lastRightCount = rightCount;
+
+  float avgCounts = (dL + dR) / 2.0;
+  float wheelCircumference = PI * (WHEEL_DIAMETER_CM / 100.0);
+  float distanceDelta = (avgCounts / COUNTS_PER_REV) * wheelCircumference;
+
+  distanceMeters += distanceDelta;
+  speedMps = distanceDelta / (UPDATE_INTERVAL_MS / 1000.0);
+}
+
+/****************************************************
+ * PWM SCALING BASED ON FRONT DISTANCE
+ ****************************************************/
+int computeForwardPWM(float frontDist) {
+  if (frontDist <= SAFE_DISTANCE) return 0;
+  if (frontDist >= WARNING_DISTANCE) return MAX_PWM;
+
+  float ratio = (frontDist - SAFE_DISTANCE) /
+                (WARNING_DISTANCE - SAFE_DISTANCE);
+
+  int pwm = MIN_MOVING_PWM +
+            ratio * (MAX_PWM - MIN_MOVING_PWM);
+
+  return constrain(pwm, MIN_MOVING_PWM, MAX_PWM);
+}
+
+/****************************************************
+ * OBSTACLE AVOIDANCE LOGIC
+ ****************************************************/
+void obstacleAvoidance(float front, float left, float right) {
+
+  // HARD STOP & TURN
+  if (front <= SAFE_DISTANCE) {
+    if (left > right) {
+      setMotor(LEFT_IN1, LEFT_IN2, LEFT_PWM, -120);
+      setMotor(RIGHT_IN1, RIGHT_IN2, RIGHT_PWM, 120);
+    } else {
+      setMotor(LEFT_IN1, LEFT_IN2, LEFT_PWM, 120);
+      setMotor(RIGHT_IN1, RIGHT_IN2, RIGHT_PWM, -120);
+    }
+    return;
+  }
+
+  int basePWM = computeForwardPWM(front);
+  int leftPWM  = basePWM;
+  int rightPWM = basePWM;
+
+  // SIDE BIAS
+  if (left < SIDE_WARNING) {
+    leftPWM  -= 40;
+    rightPWM += 40;
+  }
+  else if (right < SIDE_WARNING) {
+    leftPWM  += 40;
+    rightPWM -= 40;
+  }
+
+  setMotor(LEFT_IN1, LEFT_IN2, LEFT_PWM, leftPWM);
+  setMotor(RIGHT_IN1, RIGHT_IN2, RIGHT_PWM, rightPWM);
+}
+
+/****************************************************
+ * SETUP
+ ****************************************************/
+void setup() {
+  Serial.begin(115200);
+
+  pinMode(LEFT_IN1, OUTPUT);
+  pinMode(LEFT_IN2, OUTPUT);
+  pinMode(RIGHT_IN1, OUTPUT);
+  pinMode(RIGHT_IN2, OUTPUT);
+
+  pinMode(LEFT_PWM, OUTPUT);
+  pinMode(RIGHT_PWM, OUTPUT);
+
+  pinMode(LEFT_ENC_A, INPUT_PULLUP);
+  pinMode(RIGHT_ENC_A, INPUT_PULLUP);
+
+  attachInterrupt(digitalPinToInterrupt(LEFT_ENC_A),
+                  leftEncoderISR, RISING);
+  attachInterrupt(digitalPinToInterrupt(RIGHT_ENC_A),
+                  rightEncoderISR, RISING);
+
+  pinMode(sensorFront.trigPin, OUTPUT);
+  pinMode(sensorFront.echoPin, INPUT);
+  pinMode(sensorLeft.trigPin, OUTPUT);
+  pinMode(sensorLeft.echoPin, INPUT);
+  pinMode(sensorRight.trigPin, OUTPUT);
+  pinMode(sensorRight.echoPin, INPUT);
+
+  stopMotors();
+}
+
+/****************************************************
+ * LOOP
+ ****************************************************/
+void loop() {
+  if (millis() - lastUpdate < UPDATE_INTERVAL_MS) return;
+  lastUpdate = millis();
+
+  float dFront = measureDistanceCM(sensorFront);
+  float dLeft  = measureDistanceCM(sensorLeft);
+  float dRight = measureDistanceCM(sensorRight);
+
+  updateEncoderMetrics();
+  obstacleAvoidance(dFront, dLeft, dRight);
+
+  Serial.printf(
+    "Front: %.1f cm | L: %.1f | R: %.1f | Dist: %.2f m | Speed: %.2f m/s\n",
+    dFront, dLeft, dRight, distanceMeters, speedMps
+  );
 }

@@ -1,0 +1,288 @@
+#!/usr/bin/env python3
+# Raspberry Pi 5 Brain Code
+# Save this as robot_brain.py and run with: python3 robot_brain.py
+
+import serial
+import time
+import sys
+import re
+from datetime import datetime
+
+class RobotBrain:
+    def __init__(self, port='/dev/ttyUSB0', baud_rate=115200):
+        """
+        Initialize the robot's decision-making system
+        
+        Args:
+            port: Serial port where ESP32-S3 is connected
+            baud_rate: Must match ESP32's Serial.begin() speed
+        """
+        self.port = port
+        self.baud_rate = baud_rate
+        self.serial_connection = None
+        
+        # Sensor data storage
+        self.sensor_data = {
+            'left': 0,
+            'center': 0,
+            'right': 0,
+            'timestamp': None
+        }
+        
+        # Decision thresholds (adjust these based on your testing)
+        self.thresholds = {
+            'danger': 80,      # Immediate stop/backup
+            'warning': 50,     # Slow down or turn
+            'clear': 20        # Safe to go forward fast
+        }
+        
+        # State tracking
+        self.last_command = "STOP"
+        self.consecutive_same_command = 0
+        
+    def connect(self):
+        """Establish serial connection with ESP32-S3"""
+        try:
+            self.serial_connection = serial.Serial(
+                port=self.port,
+                baudrate=self.baud_rate,
+                timeout=1,
+                write_timeout=1
+            )
+            print(f"✅ Connected to ESP32-S3 on {self.port}")
+            print(f"📡 Baud rate: {self.baud_rate}")
+            return True
+        except serial.SerialException as e:
+            print(f"❌ Failed to connect: {e}")
+            print(f"💡 Tip: Check if ESP32 is connected and USB CDC is enabled")
+            print(f"💡 Run 'ls /dev/tty*' to find your ESP32's port")
+            return False
+    
+    def read_sensor_data(self):
+        """Read and parse one line of sensor data from ESP32"""
+        if not self.serial_connection or not self.serial_connection.is_open:
+            return False
+        
+        try:
+            # Read a line from serial (ends with \n)
+            if self.serial_connection.in_waiting > 0:
+                line = self.serial_connection.readline().decode('utf-8').strip()
+                
+                # Parse format: "L:45,C:67,R:23"
+                match = re.search(r'L:(\d+),C:(\d+),R:(\d+)', line)
+                if match:
+                    self.sensor_data['left'] = int(match.group(1))
+                    self.sensor_data['center'] = int(match.group(2))
+                    self.sensor_data['right'] = int(match.group(3))
+                    self.sensor_data['timestamp'] = datetime.now()
+                    return True
+                else:
+                    # Print unexpected data for debugging
+                    if line:
+                        print(f"📝 Unexpected data: {line}")
+                    return False
+            return False
+        except (serial.SerialException, UnicodeDecodeError) as e:
+            print(f"⚠️ Serial read error: {e}")
+            return False
+    
+    def make_decision(self):
+        """
+        Make navigation decision based on sensor data
+        Returns: command string to send to ESP32
+        """
+        left = self.sensor_data['left']
+        center = self.sensor_data['center']
+        right = self.sensor_data['right']
+        
+        # Decision tree (priority from highest to lowest)
+        
+        # 1. DANGER: Object very close in center
+        if center >= self.thresholds['danger']:
+            return "BACKWARD"  # Back away quickly
+        
+        # 2. IMMEDIATE OBSTACLE: Object close in center
+        elif center >= self.thresholds['warning']:
+            # Check which side is clearer
+            if left < right:
+                return "TURN_LEFT"
+            else:
+                return "TURN_RIGHT"
+        
+        # 3. SIDE OBSTACLES: Object close on one side
+        elif left >= self.thresholds['warning']:
+            return "TURN_RIGHT"
+        
+        elif right >= self.thresholds['warning']:
+            return "TURN_LEFT"
+        
+        # 4. CAUTION: Object approaching but not critical
+        elif center >= self.thresholds['clear']:
+            return "SLOW_FORWARD"
+        
+        # 5. CLEAR PATH: All good
+        else:
+            return "FORWARD"
+    
+    def send_command(self, command):
+        """Send a command to the ESP32-S3"""
+        if not self.serial_connection or not self.serial_connection.is_open:
+            return False
+        
+        try:
+            # Add newline character as delimiter
+            self.serial_connection.write(f"{command}\n".encode())
+            
+            # Optional: Read response from ESP32
+            time.sleep(0.05)
+            if self.serial_connection.in_waiting:
+                response = self.serial_connection.readline().decode('utf-8').strip()
+                if response:
+                    print(f"  📨 ESP32: {response}")
+            
+            return True
+        except serial.SerialException as e:
+            print(f"⚠️ Serial write error: {e}")
+            return False
+    
+    def display_status(self, command):
+        """Print current status to console"""
+        # Clear line and move cursor to beginning
+        sys.stdout.write('\r')
+        
+        # Create status display
+        status = (f"L:{self.sensor_data['left']:3d} "
+                 f"C:{self.sensor_data['center']:3d} "
+                 f"R:{self.sensor_data['right']:3d}  |  "
+                 f"CMD: {command:<12}  |  "
+                 f"Repeat: {self.consecutive_same_command}")
+        
+        sys.stdout.write(status)
+        sys.stdout.flush()
+    
+    def run(self):
+        """Main control loop"""
+        print("\n" + "="*60)
+        print("🤖 ROBOT BRAIN ACTIVATED")
+        print("="*60)
+        print(f"📊 Thresholds: Danger={self.thresholds['danger']}, "
+              f"Warning={self.thresholds['warning']}, Clear={self.thresholds['clear']}")
+        print("🛑 Press Ctrl+C to stop")
+        print("-"*60)
+        
+        if not self.connect():
+            return
+        
+        # Wait for ESP32 to be ready
+        time.sleep(2)
+        
+        try:
+            while True:
+                # Read sensor data
+                if self.read_sensor_data():
+                    # Make decision
+                    new_command = self.make_decision()
+                    
+                    # Avoid spamming same command (optional)
+                    if new_command == self.last_command:
+                        self.consecutive_same_command += 1
+                    else:
+                        self.consecutive_same_command = 0
+                    
+                    # Send command to ESP32
+                    self.send_command(new_command)
+                    self.last_command = new_command
+                    
+                    # Display status
+                    self.display_status(new_command)
+                
+                # Small delay to prevent CPU overload
+                time.sleep(0.05)  # 20Hz update rate
+                
+        except KeyboardInterrupt:
+            print("\n\n🛑 Shutting down...")
+            # Send stop command before exiting
+            self.send_command("STOP")
+            time.sleep(0.1)
+        finally:
+            if self.serial_connection and self.serial_connection.is_open:
+                self.serial_connection.close()
+                print("🔌 Serial connection closed")
+            print("👋 Goodbye!")
+
+# Advanced version with logging and config file support
+class AdvancedRobotBrain(RobotBrain):
+    """Extended version with file logging and configurable thresholds"""
+    
+    def __init__(self, port='/dev/ttyUSB0', baud_rate=115200, log_file='robot_log.csv'):
+        super().__init__(port, baud_rate)
+        self.log_file = log_file
+        self.log_enabled = True
+        
+    def log_data(self):
+        """Log sensor data and decisions to CSV file"""
+        if not self.log_enabled:
+            return
+        
+        try:
+            with open(self.log_file, 'a') as f:
+                f.write(f"{self.sensor_data['timestamp']},"
+                       f"{self.sensor_data['left']},"
+                       f"{self.sensor_data['center']},"
+                       f"{self.sensor_data['right']},"
+                       f"{self.last_command}\n")
+        except Exception as e:
+            print(f"⚠️ Logging error: {e}")
+    
+    def load_config(self, config_file='robot_config.txt'):
+        """Load thresholds from a config file"""
+        try:
+            with open(config_file, 'r') as f:
+                for line in f:
+                    if '=' in line and not line.startswith('#'):
+                        key, value = line.strip().split('=')
+                        if key in self.thresholds:
+                            self.thresholds[key] = int(value)
+            print(f"✅ Loaded config from {config_file}")
+        except FileNotFoundError:
+            print(f"ℹ️ No config file found at {config_file}, using defaults")
+    
+    def run_with_logging(self):
+        """Run with automatic data logging"""
+        # Create log file header if it doesn't exist
+        try:
+            with open(self.log_file, 'x') as f:
+                f.write("timestamp,left,center,right,command\n")
+        except FileExistsError:
+            pass
+        
+        super().run()
+
+# ========== MAIN ENTRY POINT ==========
+if __name__ == "__main__":
+    # Find the correct serial port automatically
+    import glob
+    
+    # Common ESP32-S3 port patterns
+    possible_ports = glob.glob('/dev/ttyUSB*') + glob.glob('/dev/ttyACM*')
+    
+    if not possible_ports:
+        print("❌ No ESP32-S3 found!")
+        print("💡 Make sure your ESP32-S3 is connected via USB")
+        print("💡 Check USB CDC is enabled in Arduino IDE")
+        sys.exit(1)
+    
+    # Use the first found port
+    port_to_use = possible_ports[0]
+    print(f"🔍 Found ESP32 on {port_to_use}")
+    
+    # Choose which brain to run:
+    
+    # Option 1: Basic brain (starts here)
+    brain = RobotBrain(port=port_to_use)
+    brain.run()
+    
+    # Option 2: Advanced brain with logging
+    # brain = AdvancedRobotBrain(port=port_to_use)
+    # brain.load_config()  # Optional: load thresholds from file
+    # brain.run_with_logging()

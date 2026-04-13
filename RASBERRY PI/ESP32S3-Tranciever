@@ -1,0 +1,184 @@
+// ESP32-S3 Code - Upload this from your Pi's Arduino IDE
+// This acts as the sensor reader and motor controller
+
+// Pin definitions (adjust these to your actual wiring)
+#define LEFT_SENSOR_CS   5
+#define CENTER_SENSOR_CS 6
+#define RIGHT_SENSOR_CS  7
+
+// Motor control pins (example - adjust to your motor driver)
+#define MOTOR_LEFT_PWM   9
+#define MOTOR_RIGHT_PWM  10
+#define MOTOR_LEFT_DIR   8
+#define MOTOR_RIGHT_DIR  11
+
+// Variables for 8x8 matrix data (example - adjust for your actual sensor)
+int leftMatrix[64];
+int centerMatrix[64];
+int rightMatrix[64];
+
+// Zone averages (0-100 scale)
+int leftZone = 0;
+int centerZone = 0;
+int rightZone = 0;
+
+void setup() {
+  Serial.begin(115200);  // Important: Match this baud rate in your Pi code
+  
+  // Initialize motor control pins
+  pinMode(MOTOR_LEFT_PWM, OUTPUT);
+  pinMode(MOTOR_RIGHT_PWM, OUTPUT);
+  pinMode(MOTOR_LEFT_DIR, OUTPUT);
+  pinMode(MOTOR_RIGHT_DIR, OUTPUT);
+  
+  // Initialize sensor pins
+  pinMode(LEFT_SENSOR_CS, OUTPUT);
+  pinMode(CENTER_SENSOR_CS, OUTPUT);
+  pinMode(RIGHT_SENSOR_CS, OUTPUT);
+  
+  // Stop motors initially
+  stopMotors();
+  
+  Serial.println("ESP32-S3 Ready");
+}
+
+void loop() {
+  // Step 1: Read all three 8x8 matrix sensors
+  read8x8Matrix(LEFT_SENSOR_CS, leftMatrix);
+  read8x8Matrix(CENTER_SENSOR_CS, centerMatrix);
+  read8x8Matrix(RIGHT_SENSOR_CS, rightMatrix);
+  
+  // Step 2: Calculate zone averages (0-100 scale)
+  leftZone = calculateZoneAverage(leftMatrix);
+  centerZone = calculateZoneAverage(centerMatrix);
+  rightZone = calculateZoneAverage(rightMatrix);
+  
+  // Step 3: Send data to Raspberry Pi
+  sendDataToPi();
+  
+  // Step 4: Listen for commands from Pi
+  if (Serial.available()) {
+    String command = Serial.readStringUntil('\n');
+    command.trim();  // Remove any whitespace
+    executeCommand(command);
+  }
+  
+  delay(50);  // 20Hz update rate
+}
+
+// Send formatted data to Pi over Serial
+void sendDataToPi() {
+  // Format: L:value,C:value,R:value
+  Serial.print("L:");
+  Serial.print(leftZone);
+  Serial.print(",C:");
+  Serial.print(centerZone);
+  Serial.print(",R:");
+  Serial.println(rightZone);
+}
+
+// Execute motor commands from Pi
+void executeCommand(String cmd) {
+  Serial.print("Executing: ");
+  Serial.println(cmd);
+  
+  if (cmd == "FORWARD") {
+    moveForward(150);  // 150 = speed (0-255)
+  }
+  else if (cmd == "BACKWARD") {
+    moveBackward(120);
+  }
+  else if (cmd == "TURN_LEFT") {
+    turnLeft(130);
+  }
+  else if (cmd == "TURN_RIGHT") {
+    turnRight(130);
+  }
+  else if (cmd == "STOP") {
+    stopMotors();
+  }
+  else if (cmd == "SLOW_FORWARD") {
+    moveForward(80);
+  }
+  else if (cmd == "MOVE_AWAY_SLOW") {
+    // Your existing "move away slowly" logic
+    moveBackward(100);
+    delay(500);
+    stopMotors();
+  }
+}
+
+// ========== MOTOR CONTROL FUNCTIONS ==========
+// Replace these with your actual motor driver code
+
+void moveForward(int speed) {
+  digitalWrite(MOTOR_LEFT_DIR, HIGH);
+  digitalWrite(MOTOR_RIGHT_DIR, HIGH);
+  analogWrite(MOTOR_LEFT_PWM, speed);
+  analogWrite(MOTOR_RIGHT_PWM, speed);
+}
+
+void moveBackward(int speed) {
+  digitalWrite(MOTOR_LEFT_DIR, LOW);
+  digitalWrite(MOTOR_RIGHT_DIR, LOW);
+  analogWrite(MOTOR_LEFT_PWM, speed);
+  analogWrite(MOTOR_RIGHT_PWM, speed);
+}
+
+void turnLeft(int speed) {
+  digitalWrite(MOTOR_LEFT_DIR, LOW);
+  digitalWrite(MOTOR_RIGHT_DIR, HIGH);
+  analogWrite(MOTOR_LEFT_PWM, speed);
+  analogWrite(MOTOR_RIGHT_PWM, speed);
+}
+
+void turnRight(int speed) {
+  digitalWrite(MOTOR_LEFT_DIR, HIGH);
+  digitalWrite(MOTOR_RIGHT_DIR, LOW);
+  analogWrite(MOTOR_LEFT_PWM, speed);
+  analogWrite(MOTOR_RIGHT_PWM, speed);
+}
+
+void stopMotors() {
+  analogWrite(MOTOR_LEFT_PWM, 0);
+  analogWrite(MOTOR_RIGHT_PWM, 0);
+}
+
+// ========== SENSOR FUNCTIONS ==========
+// Replace these with your actual 8x8 matrix sensor library code
+
+void read8x8Matrix(int csPin, int matrix[64]) {
+  // This is a placeholder - replace with your actual sensor reading code
+  // For example, if using an Adafruit AMG88xx thermal camera:
+  /*
+  digitalWrite(csPin, LOW);
+  for(int i = 0; i < 64; i++) {
+    matrix[i] = readSensorPixel(i);  // Your actual read function
+  }
+  digitalWrite(csPin, HIGH);
+  */
+  
+  // For testing: simulate random readings
+  for(int i = 0; i < 64; i++) {
+    matrix[i] = random(0, 100);
+  }
+}
+
+int calculateZoneAverage(int matrix[64]) {
+  // This converts your 8x8 matrix into a single 0-100 value
+  // Adjust this based on your sensor's characteristics
+  
+  long sum = 0;
+  for(int i = 0; i < 64; i++) {
+    sum += matrix[i];
+  }
+  
+  // Average and map to 0-100 scale
+  // Adjust divisor based on your sensor's raw value range
+  int average = sum / 64;
+  
+  // Example mapping: if sensor reads 0-1023, map to 0-100
+  // average = map(average, 0, 1023, 0, 100);
+  
+  return constrain(average, 0, 100);
+}
